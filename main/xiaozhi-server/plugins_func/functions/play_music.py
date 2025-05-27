@@ -11,6 +11,7 @@ from core.utils import p3
 from core.handle.sendAudioHandle import send_stt_message
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from core.utils.dialogue import Message
+from core.handle.sendLyricsHandle import start_lyrics_sync
 import requests
 from pydub import AudioSegment
 
@@ -203,6 +204,10 @@ def _validate_download(temp_path, expected_size):
 async def play_online_music(conn, specific_file=None, song_name=None):
     """播放在线音乐文件"""
     try:
+        # 提交歌词处理线程
+        asyncio.create_task(start_lyrics_sync(conn, specific_file))
+        conn.logger.bind(tag=TAG).info("开始处理歌词")
+
         selected_music = specific_file
         music_path = os.path.join(MUSIC_CACHE["music_dir"], selected_music)
         conn.tts_first_text = selected_music
@@ -211,6 +216,8 @@ async def play_online_music(conn, specific_file=None, song_name=None):
         opus_packets, duration = conn.tts.audio_to_opus_data(music_path)
         status = f"正在播放歌曲: {song_name}"
         text = f"《{song_name}》"
+        # 发送歌词名称
+        await send_stt_message(conn, text)
         conn.logger.bind(tag=TAG).info(status)
         conn.tts_last_text_index = 0
         conn.tts_first_text_index = 0
