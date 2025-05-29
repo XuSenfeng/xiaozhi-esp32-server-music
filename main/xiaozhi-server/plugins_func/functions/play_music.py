@@ -14,6 +14,7 @@ from core.utils.dialogue import Message
 from core.handle.sendLyricsHandle import start_lyrics_sync
 import requests
 from pydub import AudioSegment
+from core.handle.saveLyricsHandle import save_lyrics
 
 TAG = __name__
 
@@ -359,6 +360,23 @@ async def handle_online_song_command(conn, song_name):
         temp_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{processed_song_name}.tmp")
         response = requests.get(music_url, stream=True, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
         response.raise_for_status()
+
+        conn.logger.bind(tag=TAG).info("开始处理歌词")
+        # 获取音乐ID
+        music_mid = data['data'].get('mid', '') or ""
+        if music_mid:
+            # 如果获取到mid，调用saveLyricsHandle中的函数
+            conn.logger.bind(tag=TAG).info(f"获取到mid成功: {music_mid}，开始下载歌词")
+            asyncio.create_task(save_lyrics(conn,song_id=music_mid, id_type='mid', lyrics_dir=MUSIC_CACHE["music_cache_dir"], file_name=processed_song_name))
+        else:
+            # 否则，改为获取songid
+            conn.logger.bind(tag=TAG).info(f"未获取到mid，改为获取songid")
+            music_mid = str(data['data'].get('songid', ''))
+            if music_mid:
+                conn.logger.bind(tag=TAG).info(f"获取到songid成功: {music_mid}，开始下载歌词")
+                asyncio.create_task(save_lyrics(conn,song_id=music_mid, id_type='id', lyrics_dir=MUSIC_CACHE["music_cache_dir"], file_name=processed_song_name))
+            else:
+                conn.logger.bind(tag=TAG).info(f"未获取到songid，跳过获取。")
 
         expected_size = int(response.headers.get('Content-Length', 0))
         downloaded_size = 0
