@@ -4,6 +4,7 @@ import re
 from typing import Dict
 from pathlib import Path
 from core.handle.sendAudioHandle import send_stt_message
+from mutagen.mp3 import MP3
 
 TAG = __name__
 
@@ -25,10 +26,12 @@ async def start_lyrics_sync(conn, music_path: str):
     _is_running = True
     _start_time = time.time()
     
-    # 新增循环执行逻辑
-    while time.time() - _start_time < _get_music_duration() and _is_running:
+    # 获取真实音乐时长
+    duration = _get_music_duration(conn, music_path)  # 传入音频文件路径
+    
+    while time.time() - _start_time < duration and _is_running:
         current_pos = time.time() - _start_time
-        await _send_lyric(conn, current_pos)  # 确保调用发送方法
+        await _send_lyric(conn, current_pos)
         await asyncio.sleep(0.1)
         
     conn.logger.bind(tag=TAG).info("歌词同步任务结束")
@@ -83,9 +86,17 @@ async def _send_lyric(conn, current_pos: float):
         conn.logger.bind(tag=TAG).info(f"已发送歌词: {_lyrics_dict[closest_time]}")
         del _lyrics_dict[closest_time]
 
-def _get_music_duration():
-    """获取音乐时长（还没写，不过不重要，应该能用）"""
-    return 240  # 4分钟
+def _get_music_duration(conn, file_path: str) -> float:
+    """获取音乐真实时长（秒）"""
+    try:
+        audio = MP3(file_path)
+        if audio.info.length > 0:
+            conn.logger.bind(tag=TAG).info(f"歌曲时长: {audio.info.length}秒")
+            return audio.info.length
+        return 300  # 默认5分钟
+    except Exception as e:
+        conn.logger.bind(tag=TAG).error(f"获取音频时长失败: {str(e)}")
+        return 300  # 降级为默认值
 
 async def stop_lyrics_sync(conn):
     """停止歌词推送"""
