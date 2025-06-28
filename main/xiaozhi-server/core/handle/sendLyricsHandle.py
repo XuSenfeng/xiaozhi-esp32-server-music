@@ -4,6 +4,8 @@ import re
 from typing import Dict
 from pathlib import Path
 from core.handle.sendAudioHandle import send_stt_message
+from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
+from core.utils.dialogue import Message
 from mutagen.mp3 import MP3
 
 TAG = __name__
