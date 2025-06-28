@@ -17,7 +17,11 @@ _start_time = 0
 async def start_lyrics_sync(conn, music_path: str):
     """启动歌词同步"""
     global _current_music_path, _lyrics_dict, _is_running, _start_time
-    
+
+    # 延时xxx秒开始推送
+    # 歌词偏移量
+    await asyncio.sleep(2) 
+
     conn.logger.bind(tag=TAG).info(f"开始初始化歌词同步 | 音乐路径: {music_path}")
     _current_music_path = music_path
     _lyrics_dict = _parse_lyrics(conn, music_path)
@@ -32,7 +36,7 @@ async def start_lyrics_sync(conn, music_path: str):
     while time.time() - _start_time < duration and _is_running:
         current_pos = time.time() - _start_time
         await _send_lyric(conn, current_pos)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.1) # 延时，默认0.1
         
     conn.logger.bind(tag=TAG).info("歌词同步任务结束")
 
