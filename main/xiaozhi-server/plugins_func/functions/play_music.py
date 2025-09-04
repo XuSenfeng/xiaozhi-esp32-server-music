@@ -105,11 +105,29 @@ def _extract_song_name(text):
     return None
 
 
-def _find_best_match(potential_song, music_files):
+def _find_best_match(conn, potential_song, music_files):
     """查找最匹配的歌曲（增强版）"""
+    # 优先匹配cache目录
+    cache_dir = os.path.join(MUSIC_CACHE['music_dir'], 'cache')
+    cache_files = [f for f in os.listdir(cache_dir) if f.lower().endswith(('.mp3', '.wav'))]
+    
+    # 检查缓存目录精确匹配
+    clean_query = re.sub(r'[^\u4e00-\u9fa5\w\s]', '', potential_song).strip().lower().replace('。', '').replace('.', '')  # 同时处理中英文句号  # 去除两端特殊字符
+    conn.logger.bind(tag=TAG).debug(f"缓存查询中: {clean_query}")
+    for f in cache_files:
+        song_part = f.split(' - ', 1)[0].strip().lower().replace('。', '').replace('.', '')  # 清理缓存文件名中的标点
+        # 先精确匹配再模糊匹配
+        if clean_query == song_part:
+            return os.path.join('cache', f)
+        if difflib.SequenceMatcher(None, clean_query, song_part).ratio() >= 0.6:  # 降低模糊匹配阈值
+            conn.logger.bind(tag=TAG).debug(f"完整匹配路径: {cache_dir}\{f}")
+            conn.logger.bind(tag=TAG).debug(f"缓存模糊匹配成功: {clean_query} vs {song_part}")
+            return os.path.join('cache', f)
+            return os.path.join('cache', f)
+    
     best_match = None
     highest_score = 0
-    potential_song = re.sub(r'[^\w\s]', '', potential_song).lower()
+    potential_song = re.sub(r'[^\u4e00-\u9fa5\w\s]', '', potential_song).lower()  # 保留中文字符
 
     for music_file in music_files:
         song_name = os.path.splitext(music_file)[0]
@@ -124,11 +142,12 @@ def _find_best_match(potential_song, music_files):
         if potential_song in clean_name or clean_name in potential_song:
             score = max(score, 0.85)
             
-        if score > highest_score and score > 0.6:  # 提升阈值到0.6
+        if score > highest_score and score > 0.6:  
             highest_score = score
             best_match = music_file
             conn.logger.bind(tag=TAG).debug(f"新最佳匹配: {song_name} 得分: {score:.2f}")
     
+    # 如果缓存没找到再匹配主目录
     return best_match if highest_score >= 0.6 else None
 
 
@@ -174,9 +193,9 @@ def initialize_music_handler(conn):
             MUSIC_CACHE["music_dir"], MUSIC_CACHE["music_ext"]
         )
         MUSIC_CACHE["scan_time"] = time.time()
-        MUSIC_CACHE["music_cache_dir"] = os.path.abspath("./music/cache")
+        MUSIC_CACHE["music_cache_dir"] = os.path.abspath(os.path.join(MUSIC_CACHE["music_dir"], "cache"))
         os.makedirs(MUSIC_CACHE["music_cache_dir"], exist_ok=True)
-        MUSIC_CACHE["download_api"]  = "http://datukuai.top:1450/djs/API/QQ_Music/api.php"
+        MUSIC_CACHE["download_api"] = "https://api.vkeys.cn/v2/music/tencent"
     return MUSIC_CACHE
 
 def _detect_audio_type(file_path):
@@ -239,7 +258,8 @@ async def play_online_music(conn, specific_file=None, song_name=None):
         # 原有播放逻辑
         selected_music = specific_file
         music_path = os.path.join(MUSIC_CACHE["music_dir"], selected_music)
-        conn.logger.bind(tag=TAG).info(f"音乐文件绝对路径{music_path}")
+        conn.logger.bind(tag=TAG).info(f"验证缓存路径有效性: {os.path.exists(music_path)}")
+        conn.logger.bind(tag=TAG).info(f"音乐文件绝对路径: {music_path}")
         conn.tts_first_text = selected_music
         conn.tts_last_text = selected_music
         conn.llm_finish_task = True
@@ -267,7 +287,7 @@ async def play_online_music(conn, specific_file=None, song_name=None):
             )
         )
         # 启动歌词线程
-        asyncio.create_task(start_lyrics_sync(conn, specific_file))
+        asyncio.create_task(start_lyrics_sync(conn, music_path))
         conn.logger.bind(tag=TAG).info("开始处理歌词")
 
 
@@ -309,115 +329,52 @@ async def handle_online_song_command(conn, song_name):
     """处理在线点歌指令"""
     try:
         processed_song_name = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', song_name.strip()) or "unknown"
-        
-        # 优化1：建立双重匹配机制
-        music_cache_files = [f for f in os.listdir(MUSIC_CACHE["music_cache_dir"]) if f.endswith('.mp3')]
-        if music_cache_files:
-            # 初始化匹配变量
-            best_score = -1
-            best_match = None
-            
-            # 解析缓存文件名中的歌手和歌曲主体
-            cache_items = []
-            for f in music_cache_files:
-                base_name = os.path.splitext(f)[0]
-                if ' - ' in base_name:
-                    singer, song_part = base_name.split(' - ', 1)
-                else:
-                    singer, song_part = '', base_name
-                # 提取关键词（保留前3个中文字符）
-                keywords = re.findall(r'[\u4e00-\u9fa5]{1,3}', song_part)
-                conn.logger.bind(tag=TAG).debug(f"文件解析: {f} → 歌手:{singer}, 歌曲主体:{song_part}, 关键词:{keywords}")
-                cache_items.append({
-                    'file': f,
-                    'singer': singer,
-                    'song_keywords': keywords,
-                    'full_name': base_name
-                })
-            
-            # 用户输入关键词提取
-            # 匹配至少2个连续有效字符
-            input_keywords = re.findall(r'[\u4e00-\u9fa5a-zA-Z0-9]{2,}', processed_song_name)  
-            input_keywords = input_keywords[:5]  # 扩展至前5个核心词
-            
-            # 在缓存项循环中添加权重衰减因子
-            for i, item in enumerate(cache_items):
-                # 时间衰减因子（优先匹配新缓存）
-                time_factor = 0.9 ** (len(cache_items) - i)  
-                # 计算关键词匹配得分时加入衰减因子
-                keyword_score = sum(0.8 ** idx for idx, kw in enumerate(input_keywords) if kw in item['song_keywords']) * time_factor
-                conn.logger.bind(tag=TAG).debug(f"文件匹配: {item['file']} → 关键词匹配数:{keyword_score}")
-                # 计算模糊匹配得分
-                full_match_score = difflib.SequenceMatcher(None, processed_song_name, item['full_name']).ratio()
-                conn.logger.bind(tag=TAG).debug(f"文件匹配: {item['file']} → 全称相似度:{full_match_score:.2f}")
-                # 综合得分（关键词权重更高）
-                total_score = keyword_score * 2 + full_match_score * 1
-                conn.logger.bind(tag=TAG).debug(f"文件总得分: {item['file']} → {total_score:.2f}")
-                if total_score > best_score:
-                    best_score = total_score
-                    best_match = item
-            
-            if best_match and best_score > 0.5:  # 降低阈值以适应简短输入
-                mp3_cache_path = best_match['file']
-                conn.logger.bind(tag=TAG).info(f"选择最佳缓存文件: {mp3_cache_path} (得分:{best_score:.2f})")
-                display_name = best_match['full_name'].split(' - ', 1)[-1].strip() or "未知"
-                text = f"正在播放在线歌曲: {display_name}"
-                await send_stt_message(conn, text)
-                dir_tmp = MUSIC_CACHE["music_cache_dir"]
-                conn.logger.bind(tag=TAG).debug(f"歌曲文件名：{mp3_cache_path}。缓存路径: {dir_tmp}")
-                mp3_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{mp3_cache_path}")
-                conn.logger.bind(tag=TAG).debug(f"传参：{mp3_path}, {song_name}")
-                # 改用文件名做标题
-                song_name = mp3_cache_path.replace('.mp3', '')
-                await play_online_music(conn, specific_file=mp3_path, song_name=song_name)
-                return True
-        
-        # 保持原有精确匹配逻辑
-        mp3_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{processed_song_name}.mp3")            
-        if os.path.exists(mp3_cache_path):
-            conn.logger.bind(tag=TAG).info(f"该歌曲在本地缓存中，发送缓存歌曲: {song_name}")
-            text = f"正在播放在线歌曲: {song_name}"
-            await send_stt_message(conn, text)
-            await play_online_music(conn, specific_file=mp3_cache_path, song_name=song_name)
+        # 优先使用缓存匹配逻辑
+        conn.logger.bind(tag=TAG).info(f"查询缓存中: {processed_song_name}")
+        cache_match = _find_best_match(conn, song_name, MUSIC_CACHE["music_files"])
+        if cache_match:
+            conn.logger.bind(tag=TAG).info(f"已匹配到缓存文件: {cache_match}")
+            await play_online_music(conn, specific_file=cache_match, song_name=song_name)
             return True
-
-        response = requests.get(MUSIC_CACHE["download_api"], params={'msg': song_name, 'n': 1}, timeout=10)
+        # 处理响应结果
+        response = requests.get(MUSIC_CACHE["download_api"], params={'word': song_name, 'choose': 1, 'quality': 4}, timeout=10)
         response.raise_for_status()
         data = response.json()
         conn.logger.bind(tag=TAG).info(f"点歌API响应: {data}")
         error_code = data.get('code')
 
-        if error_code != 1:
+        if error_code != 200:
             if error_code == -4:
-                error_details = data.get('text', '')
-                await send_stt_message(conn, "播放失败，该歌曲可能是会员专享歌曲。请尝试使用“在线播放歌手 - 歌曲名”来搜索歌曲，比如“在线播放周杰伦的晴天”")
+                error_details = data.get('message', '')
+                await send_stt_message(conn, "播放失败，请检查控制台输出！")
                 return False
             elif error_code == -1:
-                error_details = data.get('text', '')
+                error_details = data.get('message', '')
                 await send_stt_message(conn, error_details)
                 return False
             else:
                 await send_stt_message(conn, "在线点歌API发生错误")
-                raise Exception(f"API错误: {data['text']}")
+                raise Exception(f"API错误: {data['message']}")
 
 
-        singer = data['data'].get('singer', '') or ''
-        song = data['data'].get('song', '') or ''
-        clean_singer = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', singer.strip())
-        clean_song = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', song.strip())
-        processed_song_name = f"{clean_singer} - {clean_song}".strip() or "unknown"
-        api_song_name = data['data'].get('song', '') or _extract_song_name(song_name)
-        music_url = data['data']['music']
+        singer = data['data'].get('singer', '').replace('/', '、')
+        song_name = data['data'].get('song', '') or ''
+        processed_song_name = f"{song_name} - {singer}".strip() or "unknown"
+        song_name = data['data'].get('song', song_name)
+        api_song_name = f"{song_name} - {singer}".strip() if singer else song_name.strip()
+        music_url = data['data']['url']
         temp_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{processed_song_name}.tmp")
         response = requests.get(music_url, stream=True, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
         response.raise_for_status()
 
         conn.logger.bind(tag=TAG).info("开始处理歌词")
+        await send_stt_message(conn, "开始处理歌词，请稍后……")
         # 获取音乐ID
         music_mid = data['data'].get('mid', '') or ""
         if music_mid:
             # 如果获取到mid，调用saveLyricsHandle中的函数
             conn.logger.bind(tag=TAG).info(f"获取到mid成功: {music_mid}，开始下载歌词")
+            await send_stt_message(conn, "开始下载歌词……")
             asyncio.create_task(save_lyrics(conn,song_id=music_mid, id_type='mid', lyrics_dir=MUSIC_CACHE["music_cache_dir"], file_name=processed_song_name))
         else:
             # 否则，改为获取songid
@@ -532,6 +489,7 @@ async def handle_music_command(conn, text):
 
         potential_song = _extract_song_name(clean_text)
         if potential_song:
+            conn.logger.bind(tag=TAG).debug(f"提取到的歌曲名: {potential_song}")
             best_match = _find_best_match(potential_song, MUSIC_CACHE["music_files"])
             if best_match:
                 conn.logger.bind(tag=TAG).info(f"找到最匹配的歌曲: {best_match}")
@@ -557,188 +515,3 @@ def _get_random_play_prompt(song_name):
     ]
     # 直接使用random.choice，不设置seed
     return random.choice(prompts)
-
-
-async def play_local_music(conn, specific_file=None):
-    global MUSIC_CACHE
-    """播放本地音乐文件"""
-    try:
-        if not os.path.exists(MUSIC_CACHE["music_dir"]):
-            conn.logger.bind(tag=TAG).error(
-                f"音乐目录不存在: " + MUSIC_CACHE["music_dir"]
-            )
-            return
-
-        # 确保路径正确性
-        if specific_file:
-            selected_music = specific_file
-            music_path = os.path.join(MUSIC_CACHE["music_dir"], specific_file)
-        else:
-            if not MUSIC_CACHE["music_files"]:
-                conn.logger.bind(tag=TAG).error("未找到MP3音乐文件")
-                return
-            selected_music = random.choice(MUSIC_CACHE["music_files"])
-            music_path = os.path.join(MUSIC_CACHE["music_dir"], selected_music)
-
-        if not os.path.exists(music_path):
-            conn.logger.bind(tag=TAG).error(f"选定的音乐文件不存在: {music_path}")
-            return
-        # tts 状态信息
-        # text = _get_random_play_prompt(selected_music)
-        # await send_stt_message(conn, text)
-        # conn.dialogue.put(Message(role="assistant", content=text))
-        # conn.tts_first_text_index = 0
-        # conn.tts_last_text_index = 0
-
-        # tts_file = await asyncio.to_thread(conn.tts.to_tts, text)
-        # if tts_file is not None and os.path.exists(tts_file):
-        #     conn.tts_last_text_index = 1
-        #     opus_packets, _ = conn.tts.audio_to_opus_data(tts_file)
-        #     conn.audio_play_queue.put((opus_packets, None, 0))
-        #     os.remove(tts_file)
-
-        conn.llm_finish_task = True
-
-        if music_path.endswith(".p3"):
-            opus_packets, _ = p3.decode_opus_from_file(music_path)
-        else:
-            opus_packets, _ = conn.tts.audio_to_opus_data(music_path)
-        conn.audio_play_queue.put((opus_packets, None, conn.tts_last_text_index))
-
-    except Exception as e:
-        conn.logger.bind(tag=TAG).error(f"播放音乐失败: {str(e)}")
-        conn.logger.bind(tag=TAG).error(f"详细错误: {traceback.format_exc()}")
-        if best_match and best_score > 0.5:
-            mp3_cache_path = best_match['file']
-            conn.logger.bind(tag=TAG).info(f"选择最佳缓存文件: {mp3_cache_path} (得分:{best_score:.2f})")
-            display_name = best_match['full_name'].split(' - ', 1)[-1].strip() or "未知"
-            text = f"正在播放在线歌曲: {display_name}"
-            await send_stt_message(conn, text)
-            dir_tmp = MUSIC_CACHE["music_cache_dir"]
-            conn.logger.bind(tag=TAG).debug(f"歌曲文件名：{mp3_cache_path}。缓存路径: {dir_tmp}")
-            mp3_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{mp3_cache_path}")
-            conn.logger.bind(tag=TAG).debug(f"传参：{mp3_path}, {song_name}")
-            # 改用文件名做标题
-            song_name = mp3_cache_path.replace('.mp3', '')
-            await play_online_music(conn, specific_file=mp3_path, song_name=song_name)
-            return True
-        
-        # 保持原有精确匹配逻辑
-        mp3_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{processed_song_name}.mp3")            
-        if os.path.exists(mp3_cache_path):
-            conn.logger.bind(tag=TAG).info(f"该歌曲在本地缓存中，发送缓存歌曲: {song_name}")
-            text = f"正在播放在线歌曲: {song_name}"
-            await send_stt_message(conn, text)
-            await play_online_music(conn, specific_file=mp3_cache_path, song_name=song_name)
-            return True
-
-        response = requests.get(MUSIC_CACHE["download_api"], params={'msg': song_name, 'n': 1}, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        conn.logger.bind(tag=TAG).info(f"点歌API响应: {data}")
-        error_code = data.get('code')
-
-        if error_code != 1:
-            if error_code == -4:
-                error_details = data.get('text', '')
-                await send_stt_message(conn, "播放失败，该歌曲可能是会员专享歌曲。")
-                return False
-            elif error_code == -1:
-                error_details = data.get('text', '')
-                await send_stt_message(conn, error_details)
-                return False
-            else:
-                await send_stt_message(conn, "在线点歌API发生错误")
-                raise Exception(f"API错误: {data['text']}")
-
-        singer = data['data'].get('singer', '') or ''
-        song = data['data'].get('song', '') or ''
-        clean_singer = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', singer.strip())
-        clean_song = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', song.strip())
-        processed_song_name = f"{clean_singer} - {clean_song}".strip() or "unknown"
-        api_song_name = data['data'].get('song', '') or _extract_song_name(song_name)
-        music_url = data['data']['music']
-        temp_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{processed_song_name}.tmp")
-        response = requests.get(music_url, stream=True, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-        response.raise_for_status()
-
-        expected_size = int(response.headers.get('Content-Length', 0))
-        downloaded_size = 0
-        with open(temp_cache_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-                downloaded_size += len(chunk)
-        
-        if not _validate_download(temp_cache_path, expected_size):
-            raise Exception("文件下载不完整")
-
-        audio_type = _detect_audio_type(temp_cache_path)
-        if not audio_type:
-            raise ValueError("未知音频格式")
-
-        # 构建最终缓存文件路径
-        cache_filename = f"{processed_song_name}.{audio_type}"
-        final_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], cache_filename)
-        os.makedirs(os.path.dirname(final_cache_path), exist_ok=True)
-
-        # 强制覆盖已存在的文件
-        if os.path.exists(final_cache_path):
-            os.remove(final_cache_path)
-        os.rename(temp_cache_path, final_cache_path)
-        conn.logger.bind(tag=TAG).info(f"覆盖已存在的缓存文件: {final_cache_path}")
-
-        # 处理音频格式转换
-        if audio_type != 'mp3':
-            converted_path = convert_to_mp3(conn, final_cache_path)
-            if not converted_path:
-                raise Exception("音频转换失败")
-            
-            # 删除原始非MP3文件
-            os.remove(final_cache_path)
-            
-            # 构建目标MP3文件路径
-            mp3_cache_path = os.path.join(
-                MUSIC_CACHE["music_cache_dir"], 
-                f"{processed_song_name}.mp3"
-            )
-            
-            # 删除可能存在的同名MP3文件
-            if os.path.exists(mp3_cache_path):
-                os.remove(mp3_cache_path)
-            
-            # 重命名转换后的文件到最终位置
-            os.rename(converted_path, mp3_cache_path)
-            final_cache_path = mp3_cache_path
-            conn.logger.bind(tag=TAG).info(f"覆盖已存在的MP3缓存文件: {mp3_cache_path}")
-
-        mp3_cache_path = os.path.join(MUSIC_CACHE["music_cache_dir"], f"{processed_song_name}.mp3")
-        if final_cache_path != mp3_cache_path:
-            raise ValueError("文件格式转换失败")
-
-        text = f"正在播放在线歌曲: {api_song_name}"
-        await send_stt_message(conn, text)
-        temp_dir = MUSIC_CACHE["music_cache_dir"]
-        conn.logger.bind(tag=TAG).info(f"歌曲文件名：{song_name}。缓存路径: {temp_dir}")
-        conn.logger.bind(tag=TAG).info(f"传参：{mp3_cache_path}, {api_song_name}")
-        await play_online_music(conn, specific_file=mp3_cache_path, song_name=api_song_name)
-        
-    except Exception as e:
-        error_msg = f"在线点歌失败: {str(e)}"
-        if isinstance(e, requests.exceptions.RequestException):
-            error_msg += f"\n网络请求错误: {e.request.url} - {e.response.status_code}"
-        elif isinstance(e, ValueError) and "文件已存在" in str(e):
-            error_msg += f"\n文件冲突解决: {str(e)}"
-        else:
-            error_msg += f"\n文件处理错误: {str(e)}"
-        conn.logger.bind(tag=TAG).error(error_msg)
-        # 清理临时文件（安全检查）
-        if 'temp_cache_path' in locals() and os.path.exists(temp_cache_path):  # 修改为安全检查
-            os.remove(temp_cache_path)
-            conn.logger.bind(tag=TAG).info(f"清理临时文件: {temp_cache_path}")
-        # 如果转换过程中生成了中间文件也要清理
-        if hasattr(e, 'converted_path') and os.path.exists(e.converted_path):
-            os.remove(e.converted_path)
-            conn.logger.bind(tag=TAG).info(f"清理转换文件: {e.converted_path}")
-        await send_stt_message(conn, f"在线点歌失败，请稍后再试。错误详情: {str(e)}")
-        return False
-
